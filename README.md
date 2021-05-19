@@ -11,10 +11,12 @@ Current code base is tested under following environment:
 6. tensorboardX 2.1
 
 ## Dataset
-Create a link of the imagenet in the current folder:
+Create a link of the imagenet in the current folder:  
 `ln -s /path/to/imagenet/ data/`
 
-Prepare imagenet100 dataset for fast search process:
+Prepare imagenet100 dataset for fast search process:  
 `python lib/utils/make_data.py`
 
 ## RL-based Joint Search
+Run the bash file:  
+`bash bash run/run_linear_quantize_search.sh`
