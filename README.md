@@ -18,5 +18,14 @@ Prepare imagenet100 dataset for fast search process:
 `python lib/utils/make_data.py`
 
 ## RL-based Joint Search
+Set target latency in the bash file:
+`--target_latency 35`
+
 Run the bash file:  
-`bash bash run/run_linear_quantize_search.sh`
+`bash run/run_linear_quantize_search.sh`
+or (save the log file):
+`nohup bash run/run_linear_quantize_search.sh > search_tar35.log 2>&1 &`
+
+## Retrain and Finetune
+Copy the best policy (quantization + workload split-ratio) within the finetune.py:
+`strategy = `
