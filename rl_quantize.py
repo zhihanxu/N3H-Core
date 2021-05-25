@@ -34,7 +34,7 @@ model_names = default_model_names + customized_models_names
 # print('support models: ', model_names)
 
 
-def train(num_episode, agent, env, output, linear_quantization=False, debug=False):
+def train(num_episode, agent, env, output, debug=False):
     # best record
     best_reward = -math.inf
     best_policy = []
@@ -73,18 +73,10 @@ def train(num_episode, agent, env, output, linear_quantization=False, debug=Fals
         observation = deepcopy(observation2)
 
         if done:  # end of episode
-
-            if linear_quantization:
-                print('#{}: episode_reward:{:.4f} acc: {:.4f}'.format(episode, episode_reward, info['accuracy']))
-                # if debug:
-                #     print('#{}: episode_reward:{:.4f} acc: {:.4f}, cost: {:.4f}'.format(episode, episode_reward, info['accuracy'], info['cost'] * 1. / 8e6))
-                text_writer.write('episode_reward:{:.4f}\n'.format(episode_reward))
-            else:
-                print('#{}: episode_reward:{:.4f} acc: {:.4f}, weight: {:.4f} MB'.format(episode, episode_reward, info['accuracy'], info['w_ratio'] * 1. / 8e6))
-                # if debug:
-                #     print('#{}: episode_reward:{:.4f} acc: {:.4f}, weight: {:.4f} MB'.format(episode, episode_reward, info['accuracy'], info['w_ratio'] * 1. / 8e6))
-                # text_writer.write(
-                #     '#{}: episode_reward:{:.4f} acc: {:.4f}, weight: {:.4f} MB\n'.format(episode, episode_reward, info['accuracy'], info['w_ratio'] * 1. / 8e6))
+            print('#{}: episode_reward:{:.4f} acc: {:.4f}'.format(episode, episode_reward, info['accuracy']))
+            # if debug:
+            #     print('#{}: episode_reward:{:.4f} acc: {:.4f}, cost: {:.4f}'.format(episode, episode_reward, info['accuracy'], info['cost'] * 1. / 8e6))
+            text_writer.write('episode_reward:{:.4f}\n'.format(episode_reward))
 
             final_reward = T[-1][0]
             # agent observe and update policy
@@ -122,17 +114,12 @@ def train(num_episode, agent, env, output, linear_quantization=False, debug=Fals
             tfwriter.add_scalar('value_loss', value_loss, episode)
             tfwriter.add_scalar('policy_loss', policy_loss, episode)
             tfwriter.add_scalar('delta', delta, episode)
-            if linear_quantization:
-                tfwriter.add_scalar('info/coat_ratio', info['cost_ratio'], episode)
-                # record the preserve rate for each layer
-                for i, preserve_rate in enumerate(env.strategy):
-                    tfwriter.add_scalar('preserve_rate_w/{}'.format(i), preserve_rate[0], episode)
-                    tfwriter.add_scalar('preserve_rate_a/{}'.format(i), preserve_rate[1], episode)
-            else:
-                tfwriter.add_scalar('info/w_ratio', info['w_ratio'], episode)
-                # record the preserve rate for each layer
-                for i, preserve_rate in enumerate(env.strategy):
-                    tfwriter.add_scalar('preserve_rate_w/{}'.format(i), preserve_rate, episode)
+
+            tfwriter.add_scalar('info/coat_ratio', info['cost_ratio'], episode)
+            # record the preserve rate for each layer
+            for i, preserve_rate in enumerate(env.strategy):
+                tfwriter.add_scalar('preserve_rate_w/{}'.format(i), preserve_rate[0], episode)
+                tfwriter.add_scalar('preserve_rate_a/{}'.format(i), preserve_rate[1], episode)
 
             # text_writer.write('best reward: {}\n'.format(best_reward))
             # text_writer.write('best policy: {}\n'.format(best_policy))
@@ -147,12 +134,10 @@ if __name__ == "__main__":
     # env
     parser.add_argument('--dataset', default='imagenet', type=str, help='dataset to use')
     parser.add_argument('--dataset_root', default='data/imagenet100', type=str, help='path to dataset')
-    parser.add_argument('--preserve_ratio', default=0.1, type=float, help='preserve ratio of the model size')
+    parser.add_argument('--target_latency', default=40, type=float, help='latency bound')
     parser.add_argument('--min_bit', default=1, type=float, help='minimum bit to use')
     parser.add_argument('--max_bit', default=8, type=float, help='maximum bit to use')
     parser.add_argument('--float_bit', default=32, type=int, help='the bit of full precision float')
-    parser.add_argument('--linear_quantization', dest='linear_quantization', action='store_true')
-    parser.add_argument('--is_pruned', dest='is_pruned', action='store_true')
     # ddpg
     parser.add_argument('--hidden1', default=300, type=int, help='hidden num of first fully connect layer')
     parser.add_argument('--hidden2', default=300, type=int, help='hidden num of second fully connect layer')
@@ -239,24 +224,18 @@ if __name__ == "__main__":
     cudnn.benchmark = True
     
     #set env
-    if args.linear_quantization:
-        env = LinearQuantizeEnv(model, pretrained_model, args.dataset, args.dataset_root,
-                                compress_ratio=args.preserve_ratio, n_data_worker=args.n_worker,
+    env = LinearQuantizeEnv(model, pretrained_model, args.dataset, args.dataset_root,
+                                target_latency=args.target_latency, n_data_worker=args.n_worker,
                                 batch_size=args.data_bsize, args=args, float_bit=args.float_bit,
-                                is_model_pruned=args.is_pruned)
-    else:
-        env = QuantizeEnv(model, pretrained_model, args.dataset, args.dataset_root,
-                          compress_ratio=args.preserve_ratio, n_data_worker=args.n_worker,
-                          batch_size=args.data_bsize, args=args, float_bit=args.float_bit,
-                          is_model_pruned=args.is_pruned)
-
+                            )
+    
     nb_states = env.layer_embedding.shape[1]    # self.layer_embedding
     nb_actions = 1  # actions for weight and activation quantization
     args.rmsize = args.rmsize * len(env.quantizable_idx)  # for each layer
     print('** Actual replay buffer size: {}'.format(args.rmsize))
     agent = DDPG(nb_states, nb_actions, args)   #DDPG
 
-    best_policy, best_reward = train(args.train_episode, agent, env, args.output, linear_quantization=args.linear_quantization, debug=args.debug)
+    best_policy, best_reward = train(args.train_episode, agent, env, args.output, debug=args.debug)
     print('best_reward: ', best_reward)
     print('best_policy: ', best_policy)
 

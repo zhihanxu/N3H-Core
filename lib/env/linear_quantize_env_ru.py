@@ -17,8 +17,8 @@ from lib.utils.data_utils import get_dataset
 from lib.utils.quantize_utils_ru import QConv2d, QLinear, calibrate
 
 class LinearQuantizeEnv:
-    def __init__(self, model, pretrained_model, data, data_root, compress_ratio, args, n_data_worker=16,
-                 batch_size=256, float_bit=8, is_model_pruned=False):
+    def __init__(self, model, pretrained_model, data, data_root, target_latency, args, n_data_worker=16,
+                 batch_size=256, float_bit=8):
         # default setting nn.Conv2d, nn.Linear
         self.quantizable_layer_types = [QConv2d, QLinear]
         
@@ -37,8 +37,7 @@ class LinearQuantizeEnv:
         self.batch_size = batch_size
         self.data_type = data   #cifar10
         self.data_root = data_root
-        self.compress_ratio = compress_ratio
-        self.is_model_pruned = is_model_pruned
+        self.target_latency = target_latency
         self.val_size = args.val_size
         self.train_size = args.train_size
         self.finetune_gamma = args.finetune_gamma
@@ -85,17 +84,16 @@ class LinearQuantizeEnv:
         # build state embedding
         self._build_state_embedding()
         
-        self.org_cost = 198.99        
+        self.max_cost = 198.99        
         self.min_cost = 22.06             
 
         # sanity check
-        assert self.compress_ratio > self.min_cost / self.org_cost, \
-            'Error! You can make achieve compress_ratio smaller than min_bit!'
+        assert self.target_latency > self.min_cost
 
         # restore weight
         self.reset()
         print('=> original acc: {:.3f}% on split dataset(train: %7d, val: %7d )'.format(self.org_acc, self.train_size, self.val_size))
-        print('=> original cost: {:.4f}', self.org_cost)
+        print('=> max cost: {:.4f}', self.max_cost)
 
     def adjust_learning_rate(self):
         for param_group in self.optimizer.param_groups:
@@ -137,12 +135,12 @@ class LinearQuantizeEnv:
                 self.weight_action = self._action_wall(2, 8, action)
             else:
                 self.activation_action = self._action_wall(2, 4, action)
-                self.ratio_action = round(cal_ratio(self.cur_ind - 6, self.activation_action, self.weight_action),2)
+                self.ratio_action = round(self.cal_ratio(self.cur_ind - 6, self.activation_action, self.weight_action),2)
                 self.strategy.append([self.activation_action, self.weight_action, self.ratio_action])  # save action to strategy
 
         # all the actions are made
         if self._is_final_layer() and (not self.action_radio_button):
-            target = self.compress_ratio * self.org_cost 
+            target = self.target_latency
             target = round(target,2)
             self._keep_first_last_layer()
 
@@ -151,7 +149,7 @@ class LinearQuantizeEnv:
             print('\nResource setting: ', self.ru)
             print('strategy: ', self.strategy, 'min_cost:', self.min_cost, 'target:', target, 'current_cost:', cost)
             assert len(self.strategy) == len(self.quantizable_idx)
-            cost_ratio = cost / self.org_cost
+            cost_ratio = cost / self.max_cost
             
             self._set_mixed_precision(quantizable_idx=self.quantizable_idx, strategy=self.strategy)
             
@@ -207,7 +205,7 @@ class LinearQuantizeEnv:
         if cost > target:
             return -cost/target
         else:
-            return (acc-self.org_acc)*0.01  # self.ema_acc    (acc-self.org_acc + cost/target)*0.01   (acc-self.org_acc)*0.1
+            return (acc-self.org_acc)*0.01
 
     def reset(self):
         # restore env by loading the pretrained model
@@ -234,7 +232,6 @@ class LinearQuantizeEnv:
 
     #action space
     def _action_wall(self, min_bit, max_bit, action):
-        # assert len(self.strategy) == self.cur_ind
         # limit the action to certain range
         action = float(action)
         lbound, rbound = min_bit - 0.5, max_bit + 0.5  # same stride length for each bit
@@ -265,14 +262,11 @@ class LinearQuantizeEnv:
     def _cur_cost(self):
         cur_cost = 0
         for i, n_bit in enumerate(self.strategy):
-            cur_cost += cal_lat(i, n_bit[2], n_bit[0], n_bit[1])
+            cur_cost += self.cal_lat(i, n_bit[2], n_bit[0], n_bit[1])
         cur_cost = round(cur_cost, 2)
         return cur_cost
 
     def _init_data(self):
-        # self.train_loader, self.val_loader, n_class = get_split_train_dataset(
-        #     self.data_type, self.batch_size, self.n_data_worker, data_root=self.data_root,
-        #     val_size=self.val_size, train_size=self.train_size, for_inception=self.is_inception)
         self.train_loader, self.val_loader, n_class = get_dataset(
             self.data_type, self.batch_size, self.n_data_worker, data_root=self.data_root,
             for_inception=self.is_inception)
@@ -285,7 +279,6 @@ class LinearQuantizeEnv:
                 self.quantizable_idx.append(i)
                 self.bound_list.append((self.min_bit, self.max_bit))
         print('=> Final bound list: {}'.format(self.bound_list))    
-
 
     def _build_state_embedding(self):
         # measure model for cifar 32x32 input
@@ -361,21 +354,6 @@ class LinearQuantizeEnv:
                 layer_embedding[i] = (layer_embedding[i] - fmin) / (fmax - fmin)
 
         self.layer_embedding = layer_embedding
-
-    def _get_lookuptable(self):
-    
-        lookup_table_folder = 'lib/simulator/lookup_tables/'
-        os.makedirs(lookup_table_folder, exist_ok=True)
-        fname = lookup_table_folder + 'resource_lut.npy'
-     
-        if os.path.isfile(fname):
-            print('load latency table : ', fname)
-            ru_list = np.load(fname)
-            print(ru_list.shape)
-        else:
-            # you can put your own simulator/lookuptable here
-            raise NotImplementedError
-        return ru_list.copy()
     
     def _finetune(self, train_loader, model, epochs=1, verbose=True):
         batch_time = AverageMeter()
@@ -510,232 +488,231 @@ class LinearQuantizeEnv:
         else:
             return top1.avg
 
-def cal_bismo(i, ratio, Ab, Bb):
-    
-    RMEM = 1024 * 1 # NO impact
-    LMEM = 1024 * 1
+    def cal_bismo(self, i, ratio, Ab, Bb):
+        
+        RMEM = 1024 * 1 # NO impact
+        LMEM = self.Bm  # 1024 * 1
 
-    M = 8
-    K = 128
-    N = 16
+        M = self.M  # 8
+        K = self.K  # 128
+        N = self.N  # 16
 
-    laynum = 21
-    marray = [12544, 3136, 3136, 3136, 3136, 784, 784, 784, 784, 784, 196, 196, 196, 196, 196, 49, 49, 49, 49, 49, 1]
-    karray = [147, 576, 576, 576, 576, 576, 1152, 64, 1152, 1152, 1152, 2304, 128, 2304, 2304, 2304, 4608, 256, 4608, 4608, 512]
-    narray = [64, 64, 64, 64, 64, 128, 128, 128, 128, 128, 256, 256, 256, 256, 256, 512, 512, 512, 512, 512, 1000]
-    # narray = [16,  48,  48,  48,  32,  96, 113,  79,  96, 113, 210, 192, 207, 192, 225, 323, 481, 384, 420, 497, 650]
-
-
-    # marray = [1.024e+03,1.024e+03,1.024e+03,1.024e+03,1.024e+03,1.024e+03,1.024e+03,2.560e+02,2.560e+02,1.280e+02,2.560e+02,2.560e+02,2.560e+02,2.560e+02,6.400e+01,6.400e+01,3.200e+01,6.400e+01,6.400e+01,6.400e+01,6.400e+01,1.000e+00]
-    # karray = [27,144,144,144,144,144,144,144,288,32,288,288,288,288,288,576,64,576,576,576,576,64]
-    # narray = [16,16,16,16,16,16,16,32,32,32, 32,32,32,32,64,64,64,64,64,64,64,10]
-
-    # marray = [12544, 12544, 12544, 12544, 3136, 3136, 3136, 3136, 3136, 3136, 784, 784, 784, 784, 784, 784, 784, 784, 784, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 49, 49, 49, 49, 49, 49, 49, 49, 49, 49, 49, 49, 1]
-    # karray = [27, 9, 32, 16, 9, 96, 24, 9, 144, 24, 9, 144, 32, 9, 192, 32, 9, 192, 32, 9, 192, 64, 9, 384, 64, 9, 384, 64, 9, 384, 64, 9, 384, 96, 9, 576, 96, 9, 576, 96, 9, 576, 160, 9, 960, 160, 9, 960, 160, 9, 960, 320, 1280]
-    # # narray = [16, 32, 16, 96, 96, 24, 144, 144, 24, 144, 144, 32, 192, 192, 32, 192, 192, 32, 192, 192, 64, 384, 384, 64, 384, 384, 64, 384, 384, 64, 384, 384, 96, 576, 576, 96, 576, 576, 96, 576, 576, 160, 960, 960, 160, 960, 960, 160, 960, 960, 320, 1280, 1000]
-    # narray = [16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16]
+        laynum = 21
+        marray = [12544, 3136, 3136, 3136, 3136, 784, 784, 784, 784, 784, 196, 196, 196, 196, 196, 49, 49, 49, 49, 49, 1]
+        karray = [147, 576, 576, 576, 576, 576, 1152, 64, 1152, 1152, 1152, 2304, 128, 2304, 2304, 2304, 4608, 256, 4608, 4608, 512]
+        narray = [64, 64, 64, 64, 64, 128, 128, 128, 128, 128, 256, 256, 256, 256, 256, 512, 512, 512, 512, 512, 1000]
+        # narray = [16,  48,  48,  48,  32,  96, 113,  79,  96, 113, 210, 192, 207, 192, 225, 323, 481, 384, 420, 497, 650]
 
 
-    m = marray[i]
-    k = karray[i]
-    n = round(narray[i] * ratio)
-    
-    if n == 0:
-        return 0
-    
-    bits_l = Ab
-    bits_R = Bb
-    f = 64
+        # marray = [1.024e+03,1.024e+03,1.024e+03,1.024e+03,1.024e+03,1.024e+03,1.024e+03,2.560e+02,2.560e+02,1.280e+02,2.560e+02,2.560e+02,2.560e+02,2.560e+02,6.400e+01,6.400e+01,3.200e+01,6.400e+01,6.400e+01,6.400e+01,6.400e+01,1.000e+00]
+        # karray = [27,144,144,144,144,144,144,144,288,32,288,288,288,288,288,576,64,576,576,576,576,64]
+        # narray = [16,16,16,16,16,16,16,32,32,32, 32,32,32,32,64,64,64,64,64,64,64,10]
 
-    felog = 3
-    rmem_num_regions = math.pow(2, felog)
-    rmem_region_size = RMEM/rmem_num_regions
-    tiles_m = math.ceil(m/M)
-    tiles_n = math.ceil(n/N)
-    tiles_k = math.ceil(k/K)
-    lmem_region_size = tiles_k * bits_l
-    lmem_num_regions = math.floor(LMEM/(lmem_region_size))
-    lhs_fetches = math.floor(tiles_m/lmem_num_regions)
-    if(tiles_m % lmem_num_regions != 0):
-        lhs_fetches += 1
-    last_iter_m = tiles_m % lmem_num_regions
-
-    if(last_iter_m != 0):
-        total_iters = lmem_num_regions * tiles_n * (lhs_fetches - 1) + last_iter_m * tiles_n
-    else:
-        total_iters = lmem_num_regions * tiles_n * lhs_fetches
-
-    fetch_base = 32
-    fetch_trans = 6 + 1 + 2
-    lfetch_bram = M * (K*bits_l*tiles_k/f)
-    # rfetch_bram = N * (K*bits_R*tiles_k/f)
-    ## modify
-    rfetch_bram = N * (tiles_k * bits_R * K/f)
-
-    base_latency = 238
-    sync_latency = 5
+        # marray = [12544, 12544, 12544, 12544, 3136, 3136, 3136, 3136, 3136, 3136, 784, 784, 784, 784, 784, 784, 784, 784, 784, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 196, 49, 49, 49, 49, 49, 49, 49, 49, 49, 49, 49, 49, 1]
+        # karray = [27, 9, 32, 16, 9, 96, 24, 9, 144, 24, 9, 144, 32, 9, 192, 32, 9, 192, 32, 9, 192, 64, 9, 384, 64, 9, 384, 64, 9, 384, 64, 9, 384, 96, 9, 576, 96, 9, 576, 96, 9, 576, 160, 9, 960, 160, 9, 960, 160, 9, 960, 320, 1280]
+        # # narray = [16, 32, 16, 96, 96, 24, 144, 144, 24, 144, 144, 32, 192, 192, 32, 192, 192, 32, 192, 192, 64, 384, 384, 64, 384, 384, 64, 384, 384, 64, 384, 384, 96, 576, 576, 96, 576, 576, 96, 576, 576, 160, 960, 960, 160, 960, 960, 160, 960, 960, 320, 1280, 1000]
+        # narray = [16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16,16]
 
 
-    popcount_latency = {'8':1, '16':1, '32':2, '64':3, '128':3, '256':4, '512':5}
-    # Exce_latency = (bits_R * bits_l * tiles_k) * 5 + popcount_latency[str(K)] + 5
-    # print(Exce_latency)
+        m = marray[i]
+        k = karray[i]
+        n = round(narray[i] * ratio)
+        
+        if n == 0:
+            return 0
+        
+        bits_l = Ab
+        bits_R = Bb
+        f = 64
 
-    Exce_latency = (tiles_k + 8) * bits_R * bits_l + 8
+        felog = 3
+        rmem_num_regions = math.pow(2, felog)
+        rmem_region_size = RMEM/rmem_num_regions
+        tiles_m = math.ceil(m/M)
+        tiles_n = math.ceil(n/N)
+        tiles_k = math.ceil(k/K)
+        lmem_region_size = tiles_k * bits_l
+        lmem_num_regions = math.floor(LMEM/(lmem_region_size))
+        lhs_fetches = math.floor(tiles_m/lmem_num_regions)
+        if(tiles_m % lmem_num_regions != 0):
+            lhs_fetches += 1
+        last_iter_m = tiles_m % lmem_num_regions
 
-
-    lfetch_latency = (fetch_base + fetch_trans + lfetch_bram + sync_latency)
-    rfetch_latency = (fetch_base + fetch_trans + rfetch_bram + sync_latency)
-
-    if (lfetch_latency-1 > Exce_latency):
-        delt = 0
-    else:
-        delt = 10 + (lmem_num_regions - 3) * (Exce_latency - lfetch_latency)
-
-    if total_iters > lmem_num_regions + 3:
-        if lhs_fetches > 1:
-            fetch_receive = ((lmem_num_regions - 3) * (tiles_n - 1) * lhs_fetches + last_iter_m) * Exce_latency
+        if(last_iter_m != 0):
+            total_iters = lmem_num_regions * tiles_n * (lhs_fetches - 1) + last_iter_m * tiles_n
         else:
-            if last_iter_m > 3:
-                fetch_receive = (last_iter_m - 3) * (tiles_n - 1) * Exce_latency
-            else:
-                fetch_receive = 0
-    else:
-        fetch_receive = 0
+            total_iters = lmem_num_regions * tiles_n * lhs_fetches
 
-    fetch_receive = fetch_receive + delt * lhs_fetches
+        fetch_base = 32
+        fetch_trans = 6 + 1 + 2
+        lfetch_bram = M * (K*bits_l*tiles_k/f)
+        # rfetch_bram = N * (K*bits_R*tiles_k/f)
+        ## modify
+        rfetch_bram = N * (tiles_k * bits_R * K/f)
 
-    lfetch_run_sync = (fetch_base + fetch_trans + lfetch_bram + sync_latency)*total_iters/tiles_n
-    rfetch_run_sync = (fetch_base + fetch_trans + rfetch_bram + sync_latency)*lhs_fetches * tiles_n
-
-    Latency = base_latency + lfetch_run_sync + rfetch_run_sync + fetch_receive
-    return(Latency * pow(10, -5))
-
-def cal_ratio(i, Ab, Bb):
-    p = np.arange(0., 1.01, 0.01)
-    for ratio in p: 
-        if cal_dsp(i, ratio) < cal_bismo(i, ratio, Ab, Bb):
-            if cal_bismo(i, ratio, Ab, Bb) > cal_dsp(i, ratio-0.01):
-                ratio = ratio-0.01
-                break
-            else:
-                break
-    return ratio
-
-def cal_lat(i, ratio, Ab, Bb):
-    if cal_dsp(i, ratio) > cal_bismo(i, ratio, Ab, Bb):
-        lat = cal_dsp(i, ratio)
-    else:
-        lat = cal_bismo(i, ratio, Ab, Bb)
-    return lat
+        base_latency = 238
+        sync_latency = 5
 
 
-def cal_dsp(i, ratio):
-    if ratio == 1:
-        return 0
-    
-    marray = [12544, 3136, 3136, 3136, 3136, 784, 784, 784, 784, 784, 196, 196, 196, 196, 196, 49, 49, 49, 49, 49, 1]
-    karray = [147, 576, 576, 576, 576, 576, 1152, 64, 1152, 1152, 1152, 2304, 128, 2304, 2304, 2304, 4608, 256, 4608, 4608, 512]
-    narray = [64, 64, 64, 64, 64, 128, 128, 128, 128, 128, 256, 256, 256, 256, 256, 512, 512, 512, 512, 512, 1000]
-    sarray = [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1]
+        popcount_latency = {'8':1, '16':1, '32':2, '64':3, '128':3, '256':4, '512':5}
+        # Exce_latency = (bits_R * bits_l * tiles_k) * 5 + popcount_latency[str(K)] + 5
+        # print(Exce_latency)
+
+        Exce_latency = (tiles_k + 8) * bits_R * bits_l + 8
 
 
-    # BRAM depth
-    Dl = 1024 * 2
-    Dr = 1024 * 1
+        lfetch_latency = (fetch_base + fetch_trans + lfetch_bram + sync_latency)
+        rfetch_latency = (fetch_base + fetch_trans + rfetch_bram + sync_latency)
 
-    Dr_Num = 2
-
-    # configuration / setting
-    Batch = 1
-    InputChannel = 16
-    OutputChannel = 16
-
-    # input bit-width
-    f = 64
-
-    M = marray[i]
-    K = karray[i]
-    N = round(narray[i] * (1-ratio))
-    S = sarray[i]
-
-    ABits = 8
-    WBits = 8
-
-    # 8-bit
-    if S == 1:
-        tiles_k = math.ceil(K/InputChannel)
-        tiles_m = math.ceil(M/Batch)
-        tiles_n = math.ceil(N/OutputChannel)
-    else:
-    # 4-bit, half amount of bits, each DSP computes 2 data
-        tiles_k = math.ceil(K / 2 / InputChannel)
-        tiles_m = math.ceil(M / Batch)
-        tiles_n = math.ceil(N / OutputChannel)
-    region_l = math.floor(Dl/tiles_k)
-    # region_r = math.floor(Dr/tiles_k/(OutputChannel/Dr_Num))
-    region_r = math.floor(Dr / tiles_k / Dr_Num)
-    tiles_region_l = math.floor(tiles_m/region_l)
-    if tiles_m % region_l == 0:
-        last_iters_l = 0
-    else:
-        last_iters_l = tiles_m % region_l
-
-    tiles_region_r = math.floor(tiles_n/region_r)
-    if tiles_n % region_r == 0:
-        last_iters_r = 0
-    else:
-        last_iters_r = tiles_n % region_r
-
-
-    # execLatency = tiles_k * region_r * (region_l + (OutputChannel / Dr_Num))
-    basicLatency = 32
-    # readLatencyR = basicLatency + OutputChannel + math.ceil(InputChannel * WBits / 32) + tiles_k * (InputChannel * WBits / 64)
-    readLatencyR = basicLatency + OutputChannel/Dr_Num + tiles_k * region_r * (InputChannel * WBits / f) * (OutputChannel / Dr_Num)
-    # readLatencyR = 4400
-    # readLatencyL = basicLatency + Batch + tiles_k * 8 * (InputChannel * ABits / 64) + math.ceil(InputChannel * ABits / 32)
-    readLatencyL = basicLatency + Batch + tiles_k * 8 * (InputChannel * ABits / f) * Batch
-
-    execLatencyLite = tiles_k * region_r * Dr_Num
-    readlatencyLite = tiles_k * (InputChannel * ABits / 64) * Batch
-
-    # if execLatencyLite > readLatencyR:
-    #     LatencyLite = execLatency + readLatencyL + readLatencyR
-    # else:
-    #     LatencyLite = execLatency * (readLatencyR - execLatencyLite) + readLatencyR + readLatencyL
-
-    if execLatencyLite > readlatencyLite:
-        syncLatency = 0
-    else:
-        syncLatency = readlatencyLite - execLatencyLite
-        # print("syny")
-
-    if last_iters_r != 0:
-        execLatencyLiteLast = tiles_k * last_iters_r * Dr_Num
-        if execLatencyLiteLast > readlatencyLite:
-            syncLatencyLast = 0
+        if (lfetch_latency-1 > Exce_latency):
+            delt = 0
         else:
-            syncLatencyLast = readlatencyLite - execLatencyLiteLast
+            delt = 10 + (lmem_num_regions - 3) * (Exce_latency - lfetch_latency)
+
+        if total_iters > lmem_num_regions + 3:
+            if lhs_fetches > 1:
+                fetch_receive = ((lmem_num_regions - 3) * (tiles_n - 1) * lhs_fetches + last_iter_m) * Exce_latency
+            else:
+                if last_iter_m > 3:
+                    fetch_receive = (last_iter_m - 3) * (tiles_n - 1) * Exce_latency
+                else:
+                    fetch_receive = 0
+        else:
+            fetch_receive = 0
+
+        fetch_receive = fetch_receive + delt * lhs_fetches
+
+        lfetch_run_sync = (fetch_base + fetch_trans + lfetch_bram + sync_latency)*total_iters/tiles_n
+        rfetch_run_sync = (fetch_base + fetch_trans + rfetch_bram + sync_latency)*lhs_fetches * tiles_n
+
+        Latency = base_latency + lfetch_run_sync + rfetch_run_sync + fetch_receive
+        return(Latency * pow(10, -5))
+
+    def cal_dsp(self, i, ratio):
+        if ratio == 1:
+            return 0
+        
+        marray = [12544, 3136, 3136, 3136, 3136, 784, 784, 784, 784, 784, 196, 196, 196, 196, 196, 49, 49, 49, 49, 49, 1]
+        karray = [147, 576, 576, 576, 576, 576, 1152, 64, 1152, 1152, 1152, 2304, 128, 2304, 2304, 2304, 4608, 256, 4608, 4608, 512]
+        narray = [64, 64, 64, 64, 64, 128, 128, 128, 128, 128, 256, 256, 256, 256, 256, 512, 512, 512, 512, 512, 1000]
+        sarray = [1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1]
+
+
+        # BRAM depth
+        Dl = self.Lmem  # 1024 * 2
+        Dr = self.Rmem  # 1024 * 1
+
+        Dr_Num = 2
+
+        # configuration / setting
+        Batch = 1
+        InputChannel = 16
+        OutputChannel = 16
+
+        # input bit-width
+        f = 64
+
+        M = marray[i]
+        K = karray[i]
+        N = round(narray[i] * (1-ratio))
+        S = sarray[i]
+
+        ABits = 8
+        WBits = 8
+
+        # 8-bit
+        if S == 1:
+            tiles_k = math.ceil(K/InputChannel)
+            tiles_m = math.ceil(M/Batch)
+            tiles_n = math.ceil(N/OutputChannel)
+        else:
+        # 4-bit, half amount of bits, each DSP computes 2 data
+            tiles_k = math.ceil(K / 2 / InputChannel)
+            tiles_m = math.ceil(M / Batch)
+            tiles_n = math.ceil(N / OutputChannel)
+        region_l = math.floor(Dl/tiles_k)
+        # region_r = math.floor(Dr/tiles_k/(OutputChannel/Dr_Num))
+        region_r = math.floor(Dr / tiles_k / Dr_Num)
+        tiles_region_l = math.floor(tiles_m/region_l)
+        if tiles_m % region_l == 0:
+            last_iters_l = 0
+        else:
+            last_iters_l = tiles_m % region_l
+
+        tiles_region_r = math.floor(tiles_n/region_r)
+        if tiles_n % region_r == 0:
+            last_iters_r = 0
+        else:
+            last_iters_r = tiles_n % region_r
+
+
+        # execLatency = tiles_k * region_r * (region_l + (OutputChannel / Dr_Num))
+        basicLatency = 32
+        # readLatencyR = basicLatency + OutputChannel + math.ceil(InputChannel * WBits / 32) + tiles_k * (InputChannel * WBits / 64)
+        readLatencyR = basicLatency + OutputChannel/Dr_Num + tiles_k * region_r * (InputChannel * WBits / f) * (OutputChannel / Dr_Num)
+        # readLatencyR = 4400
+        # readLatencyL = basicLatency + Batch + tiles_k * 8 * (InputChannel * ABits / 64) + math.ceil(InputChannel * ABits / 32)
+        readLatencyL = basicLatency + Batch + tiles_k * 8 * (InputChannel * ABits / f) * Batch
+
+        execLatencyLite = tiles_k * region_r * Dr_Num
+        readlatencyLite = tiles_k * (InputChannel * ABits / 64) * Batch
+
+        # if execLatencyLite > readLatencyR:
+        #     LatencyLite = execLatency + readLatencyL + readLatencyR
+        # else:
+        #     LatencyLite = execLatency * (readLatencyR - execLatencyLite) + readLatencyR + readLatencyL
+
+        if execLatencyLite > readlatencyLite:
+            syncLatency = 0
+        else:
+            syncLatency = readlatencyLite - execLatencyLite
             # print("syny")
-    else:
-        syncLatencyLast = 0
 
-    execLatency = tiles_k * region_r * region_l * Dr_Num * (1 + syncLatency) + 6
-    # execLatency = tiles_k * region_r * (region_l + Dr_Num) * (1 + syncLatency) + 6
+        if last_iters_r != 0:
+            execLatencyLiteLast = tiles_k * last_iters_r * Dr_Num
+            if execLatencyLiteLast > readlatencyLite:
+                syncLatencyLast = 0
+            else:
+                syncLatencyLast = readlatencyLite - execLatencyLiteLast
+                # print("syny")
+        else:
+            syncLatencyLast = 0
+
+        execLatency = tiles_k * region_r * region_l * Dr_Num * (1 + syncLatency) + 6
+        # execLatency = tiles_k * region_r * (region_l + Dr_Num) * (1 + syncLatency) + 6
 
 
 
-    # LatencyLiteL = tiles_k * (last_iters_l + (OutputChannel / Dr_Num)) * region_r + readLatencyR + basicLatency + Batch + tiles_k * (last_iters_l) * (InputChannel * ABits / 64) + math.ceil(InputChannel * ABits / 32)
-    LatencyLiteL = tiles_k * last_iters_l * Dr_Num * region_r * (1 + syncLatency) + readLatencyR + basicLatency + Batch + tiles_k * 8 * (InputChannel * ABits / 64) * Batch
+        # LatencyLiteL = tiles_k * (last_iters_l + (OutputChannel / Dr_Num)) * region_r + readLatencyR + basicLatency + Batch + tiles_k * (last_iters_l) * (InputChannel * ABits / 64) + math.ceil(InputChannel * ABits / 32)
+        LatencyLiteL = tiles_k * last_iters_l * Dr_Num * region_r * (1 + syncLatency) + readLatencyR + basicLatency + Batch + tiles_k * 8 * (InputChannel * ABits / 64) * Batch
 
-    # LatencyLiteR = tiles_k * (region_l + (OutputChannel / Dr_Num)) * last_iters_r + readLatencyL + basicLatency + OutputChannel + math.ceil(InputChannel * WBits / 32) + tiles_k * region_r
-    LatencyLiteR = tiles_k * region_l * Dr_Num * last_iters_r * (1 + syncLatencyLast) + readLatencyL + basicLatency + OutputChannel + basicLatency + OutputChannel + tiles_k * last_iters_r * (InputChannel * WBits / 64) * (OutputChannel / Dr_Num)
+        # LatencyLiteR = tiles_k * (region_l + (OutputChannel / Dr_Num)) * last_iters_r + readLatencyL + basicLatency + OutputChannel + math.ceil(InputChannel * WBits / 32) + tiles_k * region_r
+        LatencyLiteR = tiles_k * region_l * Dr_Num * last_iters_r * (1 + syncLatencyLast) + readLatencyL + basicLatency + OutputChannel + basicLatency + OutputChannel + tiles_k * last_iters_r * (InputChannel * WBits / 64) * (OutputChannel / Dr_Num)
 
-    # LatencyLiteLR = tiles_k * last_iters_r * (last_iters_l + (OutputChannel / Dr_Num)) + readLatencyR + basicLatency + Batch + tiles_k * (last_iters_l) * (InputChannel * ABits / 64) + math.ceil(InputChannel * ABits / 32)
-    LatencyLiteLR = tiles_k * last_iters_r * last_iters_l * Dr_Num * (1 + syncLatencyLast) + basicLatency + Batch + tiles_k * 8 * (InputChannel * ABits / 64) * Batch + basicLatency + OutputChannel + tiles_k * last_iters_r * (InputChannel * WBits / 64) * (OutputChannel / Dr_Num)
+        # LatencyLiteLR = tiles_k * last_iters_r * (last_iters_l + (OutputChannel / Dr_Num)) + readLatencyR + basicLatency + Batch + tiles_k * (last_iters_l) * (InputChannel * ABits / 64) + math.ceil(InputChannel * ABits / 32)
+        LatencyLiteLR = tiles_k * last_iters_r * last_iters_l * Dr_Num * (1 + syncLatencyLast) + basicLatency + Batch + tiles_k * 8 * (InputChannel * ABits / 64) * Batch + basicLatency + OutputChannel + tiles_k * last_iters_r * (InputChannel * WBits / 64) * (OutputChannel / Dr_Num)
 
-    Latency = tiles_region_l * tiles_region_r * (execLatency + readLatencyR + readLatencyL) + \
-                    tiles_region_r * LatencyLiteL + \
-                    tiles_region_l * LatencyLiteR + \
-                    LatencyLiteLR + 32
+        Latency = tiles_region_l * tiles_region_r * (execLatency + readLatencyR + readLatencyL) + \
+                        tiles_region_r * LatencyLiteL + \
+                        tiles_region_l * LatencyLiteR + \
+                        LatencyLiteLR + 32
 
-    return(Latency * pow(10, -5))
+        return(Latency * pow(10, -5))
+    
+    def cal_ratio(self, i, Ab, Bb):
+        p = np.arange(0., 1.01, 0.01)
+        for ratio in p: 
+            if self.cal_dsp(i, ratio) < self.cal_bismo(i, ratio, Ab, Bb):
+                if self.cal_bismo(i, ratio, Ab, Bb) > self.cal_dsp(i, ratio-0.01):
+                    ratio = ratio-0.01
+                    break
+                else:
+                    break
+        return ratio
+
+    def cal_lat(self, i, ratio, Ab, Bb):
+        if self.cal_dsp(i, ratio) > self.cal_bismo(i, ratio, Ab, Bb):
+            lat = self.cal_dsp(i, ratio)
+        else:
+            lat = self.cal_bismo(i, ratio, Ab, Bb)
+        return lat
