@@ -18,14 +18,17 @@ Prepare imagenet100 dataset for fast search process:
 `python lib/utils/make_data.py`
 
 ## RL-based Joint Search
-Set target latency in the bash file:
+Set target latency in the bash file:  
 `--target_latency 35`
 
 Run the bash file:  
-`bash run/run_linear_quantize_search.sh`
-or (save the log file):
+`bash run/run_linear_quantize_search.sh`  
+
+or (save the log file):  
 `nohup bash run/run_linear_quantize_search.sh > search_tar35.log 2>&1 &`
 
 ## Retrain and Finetune
-Copy the best policy (quantization + workload split-ratio) within the finetune.py:
-`strategy = `
+Copy the best policy (quantization + workload split-ratio) and then paste in the finetune.py:  
+`strategy = [[8, 8, 0.25], [3, 7, 0.5], [3, 7, 0.5], [3, 7, 0.5], [3, 7, 0.5], [2, 3, 0.75], [2, 3, 0.88], [4, 8, 0.13], [3, 3, 0.75], [2, 3, 0.75], [2, 3, 0.82], [3, 3, 0.81], [4, 7, 0.06], [3, 3, 0.81], [2, 5, 0.82], [2, 2, 0.85], [3, 2, 0.9], [4, 6, 0.05], [3, 3, 0.85], [2, 4, 0.82], [8, 8, 0.3]]    # resnet18`  
+
+Retrain the base model and save the best checkpoint
