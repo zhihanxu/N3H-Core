@@ -1,6 +1,4 @@
-# Code for "[HAQ: Hardware-Aware Automated Quantization with Mixed Precision"
-# Kuan Wang*, Zhijian Liu*, Yujun Lin*, Ji Lin, Song Han
-# {kuanwang, zhijian, yujunlin, jilin, songhan}@mit.edu
+# Code for "N3H-Core: Neuron-designed Neural Network Accelerator via FPGA-based Heterogeneous Computing Cores"
 
 import os
 import time

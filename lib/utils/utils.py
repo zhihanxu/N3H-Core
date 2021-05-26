@@ -1,7 +1,3 @@
-# Code for "[HAQ: Hardware-Aware Automated Quantization with Mixed Precision"
-# Kuan Wang*, Zhijian Liu*, Yujun Lin*, Ji Lin, Song Han
-# {kuanwang, zhijian, yujunlin, jilin, songhan}@mit.edu
-
 import torch
 import numpy as np
 import matplotlib.pyplot as plt
