@@ -31,4 +31,6 @@ or (save the log file):
 Copy the best policy (quantization + workload split-ratio) and then paste in the finetune.py:  
 `strategy = [[8, 8, 0.25], [3, 7, 0.5], [3, 7, 0.5], [3, 7, 0.5], [3, 7, 0.5], [2, 3, 0.75], [2, 3, 0.88], [4, 8, 0.13], [3, 3, 0.75], [2, 3, 0.75], [2, 3, 0.82], [3, 3, 0.81], [4, 7, 0.06], [3, 3, 0.81], [2, 5, 0.82], [2, 2, 0.85], [3, 2, 0.9], [4, 6, 0.05], [3, 3, 0.85], [2, 4, 0.82], [8, 8, 0.3]]    # resnet18`  
 
-Retrain the base model and save the best checkpoint
+Retrain the base model and save the best checkpoint:  
+`bash run/run_linear_quantize_finetune.sh`  
+
