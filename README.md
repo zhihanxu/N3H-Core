@@ -1,5 +1,5 @@
 # N3H-Core
-Code for N3H-Core adapted from HAQ (CVPR 19')
+Code for N3H-Core (FPGA 22') adapted from HAQ (CVPR 19')
 
 ## Dependencies
 Current code base is tested under following environment:  
