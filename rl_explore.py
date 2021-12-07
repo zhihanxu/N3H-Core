@@ -6,7 +6,6 @@ import argparse
 import numpy as np
 from copy import deepcopy
 
-from lib.env.quantize_env import QuantizeEnv
 from lib.env.linear_quantize_env_ru import LinearQuantizeEnv
 from lib.rl.ddpg import DDPG
 from tensorboardX import SummaryWriter
