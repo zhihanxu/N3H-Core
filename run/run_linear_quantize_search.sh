@@ -1,5 +1,5 @@
-export CUDA_VISIBLE_DEVICES=3
-python rl_quantize.py               \
+export CUDA_VISIBLE_DEVICES=0
+python rl_explore.py               \
  --arch res18_image                 \
  --dataset imagenet100              \
  --dataset_root data/imagenet100    \
