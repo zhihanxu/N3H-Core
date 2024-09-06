@@ -1,5 +1,5 @@
 # N3H-Core
-Code for N3H-Core (FPGA 22')
+Software-part code of N3H-Core
 
 ## Dependencies
 Current code base is tested under following environment:  
